@@ -23,18 +23,26 @@ using namespace std;
 
 typedef enum {ACK, OPEN, QUERY, ADD, RELAY} KIND; //5 different kinds of packets
 typedef enum {DROP, FORWARD } ACTION; //two different kinds of actions
-typedef struct { int srcIP; int dstIP; } MSG_PACK;
+
 typedef struct {
 	int srcIP_lo;
 	int srcIP_hi;
 	int dstIP_lo;
 	int dstIP_hi;
 	ACTION actionType;
-	int actionVal; //switch to forward to if this field is used
+	int actionVal; //the port to forward to if this field is used
 		int pri; //0 highest, 4 lowest
 } MSG_RULE; //used for the ADD type
 
-typedef union { MSG_PACK packet; MSG_RULE rule;} MSG; //MSG can be an entire packet or rule NOTE May have to change this
+typedef struct {
+	int packIP_lo;
+	int packIP_hi;
+	int port1;
+	int port2;
+
+} MSG_PACKET; //used for OPEN. The switch sends its details to the controller, may have to rework this
+
+typedef union { MSG_PACKET packet; MSG_RULE rule;} MSG; //MSG can be an entire packet or rule NOTE May have to change this
 typedef struct { KIND kind; MSG msg; } FRAME;
 
 typedef struct {
@@ -126,7 +134,9 @@ void printController(Controller cont)
 void executeController(int numberofSwitches)
 {	/* This method will be used for the instance that the controller is chosen*/
 	Controller cont;
-	cont.openRcvCounter = 0;
+	int numberOfFifos = 0; //keeps track of how many FIFOs the controller is listening to
+
+	cont.openRcvCounter = 0; //initialize counters
 	cont.queryRcvCounter = 0;
 	cont.ackSentCounter = 0;
 	cont.addSentCounter = 0;
@@ -166,6 +176,9 @@ void executeController(int numberofSwitches)
 		{
 			cout << "Invalid Command" << endl; continue;
 		}
+
+		//poll the fifos and see if switches are trying to communicate
+
 	}	
 	
 	
@@ -207,10 +220,49 @@ void printFlowTable(Switch sw)
 	printf("\t Transmitted:\tOPEN:%d, QUERY:%d, RELAYOUT:%d \n\n", sw.openCounter, sw.queryCounter, sw.relayOutCounter);
 }
 
+MSG composePacketMessage(Switch* sw)
+{
+	MSG msg;
 
-void sendOpenPacket(int CSfifo, int SCfifo, Switch sw)
+	msg.packet.port1 = sw->port1;
+	msg.packet.port2 = sw->port2;
+	msg.packet.packIP_lo = sw->IP_lo;
+	msg.packet.packIP_hi = sw->IP_hi;
+
+	return msg;
+}
+
+void sendOpenPacket(int CSfifo, int SCfifo, Switch* sw)
 { /*this method is called when a switch is initialized, it sends the open packet
   to the controller and waits to receive the ACK packet*/
+	struct pollfd poll_list[1]; //help on usign poll from http://www.unixguide.net/unix/programming/2.1.2.shtml
+	MSG msg;
+	FRAME frame;
+
+	poll_list[0].fd = SCfifo;
+	poll_list[0].events = POLLIN;
+
+	msg = composePacketMessage(sw);
+	//send the frame, indicating it is a packet of type OPEN
+	sendFrame(CSfifo, OPEN, &msg);
+	//use polling and wait for server to send ACK packet
+	printf("Waiting for server to acknowledge...\n");
+	poll(poll_list, 1, -1); //wait forever (maybe a bad idea, no?)
+	if ((poll_list[0].revents&POLLIN) == POLLIN)
+	{
+		//server wrote to SCfifo
+		frame = rcvFrame(SCfifo);
+		if (frame.kind == ACK)
+		{	//switch is now opened and connected to controller, increment counters
+			sw->openCounter += 1;
+			sw->ackCounter += 1;
+			sw->opened = true;
+			return;
+		}
+
+		
+	}
+	else { printf("error communicating with controller \n"); return; }
 
 }
 
@@ -260,7 +312,7 @@ void executeSwitch(char* filename, int port1, int port2 , int lowIP, int highIP,
 	}
 
 	//send open packet to controller
-	sendOpenPacket(CSfifo, SCfifo, sw);
+	sendOpenPacket(CSfifo, SCfifo, &sw);
 
 	string line;
 	ifstream file(filename); 
