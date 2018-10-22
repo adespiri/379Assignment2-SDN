@@ -39,12 +39,12 @@ typedef struct {
 	int packIP_hi;
 	int port1;
 	int port2;
-	int switchNumber;
+	int switchNumber; 
 
 } MSG_PACKET; //used for OPEN. The switch sends its details to the controller, may have to rework this
 
 
-typedef union { MSG_PACKET packet; MSG_RULE rule; } MSG; //MSG can be an entire packet or rule or empty string to indicate no message
+typedef union { MSG_PACKET packet; MSG_RULE rule;} MSG; //MSG can be an entire packet or rule or entire switch
 typedef struct { KIND kind; MSG msg; } FRAME;
 
 typedef struct {
@@ -83,7 +83,7 @@ typedef struct {
 	int queryRcvCounter;
 	int ackSentCounter;
 	int addSentCounter;
-	vector<Switch> connectedSwitches;
+	vector<MSG_PACKET> connectedSwitches; //used for when controller acknowledges a new switch
 	vector<int> fifoReadList; //fifo read list contains all fifos that the controller will write to
 	vector<int> fifoWriteList; //fifos to write to
 } Controller; //controller struct to contain counters
@@ -126,16 +126,17 @@ void printController(Controller cont)
 { /* This method will print the controller details*/
 	printf("Switch Information: \n");
 	//for every switch that is connected, print its details
+	for (int i = 0; i < cont.connectedSwitches.size(); i++)
+	{
+		printf("[sw%d] port1= %d, port2= %d, port3= %d-%d\n", cont.connectedSwitches.at(i).switchNumber,
+			cont.connectedSwitches.at(i).port1, cont.connectedSwitches.at(i).port2,
+			cont.connectedSwitches.at(i).packIP_lo, cont.connectedSwitches.at(i).packIP_hi);
+	}
 
 	printf("\n");
 	printf("Packet Stats: \n");
 	printf("\tReceived:\tOPEN:%d, QUERY:%d\n", cont.openRcvCounter, cont.queryRcvCounter);
 	printf("\tTransmitted:\tACK:%d, ADD:%d\n\n", cont.ackSentCounter, cont.addSentCounter);
-}
-
-void updateControllerList(Controller* cont, MSG msg)
-{
-
 }
 
 void sendAckPacket(int switchNumber, int SCfifo)
@@ -210,12 +211,13 @@ void executeController(int numberofSwitches)
 				frame = rcvFrame(pollReadList[i].fd);
 
 				if (frame.kind == OPEN)
-				{	//update controller list
-					updateControllerList(&cont,frame.msg);
-
-					//send the switch ACK
+				{	//update controller list and counter
+					cont.connectedSwitches.push_back(frame.msg.packet);
+					cont.openRcvCounter += 1;
+					//send the switch ACK and increase ACK counter
 					cout << "New switch attempting to open" << endl;
 					sendAckPacket(frame.msg.packet.switchNumber, cont.fifoWriteList[i]); //the corresponding write FIFO is at the same index as the read FIFO
+					cont.ackSentCounter += 1;
 				}
 			}
 		}
@@ -276,7 +278,7 @@ MSG composePacketMessage(Switch* sw)
 void sendOpenPacket(int CSfifo, int SCfifo, Switch* sw)
 { /*this method is called when a switch is initialized, it sends the open packet
   to the controller and waits to receive the ACK packet*/
-	struct pollfd poll_list[1]; //help on usign poll from http://www.unixguide.net/unix/programming/2.1.2.shtml
+	struct pollfd poll_list[1]; //help on using poll from http://www.unixguide.net/unix/programming/2.1.2.shtml
 	MSG msg;
 	FRAME frame;
 
@@ -385,6 +387,7 @@ void executeSwitch(char* filename, int port1, int port2 , int lowIP, int highIP,
 					printFlowTable(sw);
 					return;
 				}
+				else { printf("Invalid Command"); continue; }
 
 				//poll
 			}
@@ -404,6 +407,7 @@ void executeSwitch(char* filename, int port1, int port2 , int lowIP, int highIP,
 			printFlowTable(sw);
 			return;
 		}
+		else { printf("Invalid Command\n"); continue; }
 	}
 	
 }
