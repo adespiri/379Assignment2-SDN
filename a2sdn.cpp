@@ -310,6 +310,11 @@ void sendOpenPacket(int CSfifo, int SCfifo, Switch* sw)
 
 }
 
+bool checkRuleExists(Switch sw, int lowIP, int highIP)
+{
+	return true;
+}
+
 void executeSwitch(char* filename, int port1, int port2 , int lowIP, int highIP, char* thisSwitch, int switchNum)
 {	/* This method will be used for the instance that the switch is chosen*/
 	//First initialize the switch object
@@ -366,13 +371,38 @@ void executeSwitch(char* filename, int port1, int port2 , int lowIP, int highIP,
 		if (file.good())
 		{
 			while (getline(file, line))
-			{
+			{	
 				//ignore any comments or white lines or lines where the switch is not the current switch
 				if (line[0] == '#' || line[0] == '\r' || line[0] == '\n') {
 					continue;
 				}
 				else if (strcmp(line.substr(0, line.find(" ")).c_str(), sw.switchIs
 				)) continue;
+		
+				/*tokenize read string and determine if any of the rules for the switch apply TOKENIZING was created in reference to lab material 
+				and https://stackoverflow.com/questions/7352099/stdstring-to-char*/
+				char cline[100];
+				char* temp;
+				int lowIP;
+				int highIP;
+				
+				strcpy(cline, line.c_str());
+		
+				temp = strtok(cline, " "); //temp is now switch name
+				temp = strtok(NULL, " "); //temp is now lowIP
+				lowIP = atoi(temp);
+				temp = strtok(NULL, " "); //temp is now highIP
+				highIP = atoi(temp);
+
+				//check if there is a rule that exists with these IP ranges
+				if (checkRuleExists(sw, lowIP, highIP))
+				{
+
+				}
+				else //no rule exists and we must QUERY
+				{
+
+				}
 
 				//prompt user for command and then poll
 				cout << "Please enter 'list' or 'exit': ";
