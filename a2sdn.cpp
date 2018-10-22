@@ -74,6 +74,8 @@ typedef struct {
 	int ackSentCounter;
 	int addSentCounter;
 	vector<Switch> connectedSwitches;
+	vector<int> fifoReadList; //fifo read list contains all fifos that the controller will write to
+	vector<int> fifoWriteList; //fifos to write to
 } Controller; //controller struct to contain counters
 
 void sendFrame(int fd, KIND kind, MSG *msg) //using lab exercise on eclass as a reference
@@ -85,6 +87,16 @@ void sendFrame(int fd, KIND kind, MSG *msg) //using lab exercise on eclass as a 
 	frame.msg = *msg;
 	write(fd, (char *)&frame, sizeof(frame));
 
+}
+
+int openFIFO(int source, int destination)
+{	/*This method opens up a fifo determined by its destination switch number (0 for controller) and destination switch number*/
+	char fifoString[20];
+
+	strcpy(fifoString, "fifo-x-y");
+	fifoString[5] = source + '0'; //convert to a character and replace x with source Number
+	fifoString[7] = destination + '0'; //do the same with y and replace it with destination
+	return open(fifoString, O_RDWR);
 }
 
 FRAME rcvFrame(int fd)
@@ -121,6 +133,17 @@ void executeController(int numberofSwitches)
 
 	char usercmd[30];
 	cout << "Controller Created" << endl;
+
+	//open up all the FIFOs that are needed (2 * number of switches)
+	for (int i = 0; i < numberofSwitches; i++)
+	{
+		int fdread;
+		int fdwrite;
+		fdread = openFIFO(i + 1, 0);
+		fdwrite = openFIFO(0, i + 1); //zero indexed so we adjust by adding 1 to i
+		cont.fifoReadList.push_back(fdread);
+		cont.fifoWriteList.push_back(fdwrite);
+	}
 
 	while (1)
 	{
@@ -184,15 +207,6 @@ void printFlowTable(Switch sw)
 	printf("\t Transmitted:\tOPEN:%d, QUERY:%d, RELAYOUT:%d \n\n", sw.openCounter, sw.queryCounter, sw.relayOutCounter);
 }
 
-int openFIFO(int source, int destination)
-{	
-	char fifoString[20];
-
-	strcpy(fifoString, "fifo-x-y");
-	fifoString[5] = source + '0'; //convert to a character and replace x with source Number
-	fifoString[7] = destination + '0'; //do the same with y and replace it with destination
-	return open(fifoString, O_RDWR);
-}
 
 void sendOpenPacket(int CSfifo, int SCfifo, Switch sw)
 { /*this method is called when a switch is initialized, it sends the open packet
