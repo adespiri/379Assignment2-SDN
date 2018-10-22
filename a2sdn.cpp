@@ -39,10 +39,12 @@ typedef struct {
 	int packIP_hi;
 	int port1;
 	int port2;
+	int switchNumber;
 
 } MSG_PACKET; //used for OPEN. The switch sends its details to the controller, may have to rework this
 
-typedef union { MSG_PACKET packet; MSG_RULE rule;} MSG; //MSG can be an entire packet or rule NOTE May have to change this
+
+typedef union { MSG_PACKET packet; MSG_RULE rule; } MSG; //MSG can be an entire packet or rule or empty string to indicate no message
 typedef struct { KIND kind; MSG msg; } FRAME;
 
 typedef struct {
@@ -131,10 +133,21 @@ void printController(Controller cont)
 	printf("\tTransmitted:\tACK:%d, ADD:%d\n\n", cont.ackSentCounter, cont.addSentCounter);
 }
 
+void updateControllerList(Controller* cont, MSG msg)
+{
+
+}
+
+void sendAckPacket(int switchNumber, int SCfifo)
+{/*	This method is used by the controller to send the acknowledgment packet to the designated switch*/
+	FRAME frame;
+	frame.kind = ACK;
+	write(SCfifo, (char *)&frame, sizeof(frame));
+}
+
 void executeController(int numberofSwitches)
 {	/* This method will be used for the instance that the controller is chosen*/
 	Controller cont;
-	int numberOfFifos = 0; //keeps track of how many FIFOs the controller is listening to
 
 	cont.openRcvCounter = 0; //initialize counters
 	cont.queryRcvCounter = 0;
@@ -151,7 +164,7 @@ void executeController(int numberofSwitches)
 		int fdwrite;
 		fdread = openFIFO(i + 1, 0);
 		fdwrite = openFIFO(0, i + 1); //zero indexed so we adjust by adding 1 to i
-		cont.fifoReadList.push_back(fdread);
+		cont.fifoReadList.push_back(fdread); 
 		cont.fifoWriteList.push_back(fdwrite);
 	}
 
@@ -177,8 +190,35 @@ void executeController(int numberofSwitches)
 			cout << "Invalid Command" << endl; continue;
 		}
 
-		//poll the fifos and see if switches are trying to communicate
+		//poll the fifos and see if switches are trying to communicate, first initialize poll fd structure
+		struct pollfd pollReadList[cont.fifoReadList.size()];
 
+		for (int i = 0; i < cont.fifoReadList.size(); i++)
+		{	
+			pollReadList[i].fd = cont.fifoReadList.at(i);
+			pollReadList[i].events = POLLIN;
+		}
+
+		poll(pollReadList, cont.fifoReadList.size(), 0); //do not block, only check if data is being shared across FIFOs
+		
+		for (int i = 0; i < cont.fifoReadList.size(); i++)
+		{
+			if ((pollReadList[i].revents&POLLIN) == POLLIN)
+			{
+				FRAME frame;
+				//if there was a request for communication, then receive frame and check what type of packet was sent
+				frame = rcvFrame(pollReadList[i].fd);
+
+				if (frame.kind == OPEN)
+				{	//update controller list
+					updateControllerList(&cont,frame.msg);
+
+					//send the switch ACK
+					cout << "New switch attempting to open" << endl;
+					sendAckPacket(frame.msg.packet.switchNumber, cont.fifoWriteList[i]); //the corresponding write FIFO is at the same index as the read FIFO
+				}
+			}
+		}
 	}	
 	
 	
@@ -228,6 +268,7 @@ MSG composePacketMessage(Switch* sw)
 	msg.packet.port2 = sw->port2;
 	msg.packet.packIP_lo = sw->IP_lo;
 	msg.packet.packIP_hi = sw->IP_hi;
+	msg.packet.switchNumber = sw->switchNumber;
 
 	return msg;
 }
@@ -257,6 +298,7 @@ void sendOpenPacket(int CSfifo, int SCfifo, Switch* sw)
 			sw->openCounter += 1;
 			sw->ackCounter += 1;
 			sw->opened = true;
+			printf("Acknowledgement Received... \n");
 			return;
 		}
 
