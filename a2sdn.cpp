@@ -14,6 +14,7 @@
 #include <poll.h> 
 #include <fstream>
 #include <poll.h>
+#include <signal.h>
 
 #define MAX_NSW 7;
 #define MAX_IP 1000;
@@ -31,7 +32,8 @@ typedef struct {
 	int dstIP_hi;
 	ACTION actionType;
 	int actionVal; //the port to forward to if this field is used
-		int pri; //0 highest, 4 lowest
+	int pri; //0 highest, 4 lowest
+	int pktCount;
 } MSG_RULE; //used for the ADD type
 
 typedef struct {
@@ -44,9 +46,11 @@ typedef struct {
 } MSG_PACKET; //used for OPEN. The switch sends its details to the controller, may have to rework this
 
 typedef struct {
+	int srcIP;
 	int dstIP;
 	int port1;
 	int port2;
+	int switchNumber;
 } MSG_QUERY; //message struct that is used when querying for rules from the controller
 
 
@@ -152,6 +156,57 @@ void sendAckPacket(int switchNumber, int SCfifo)
 	write(SCfifo, (char *)&frame, sizeof(frame));
 }
 
+void sendAddPacket(int switchNumber, int SCfifo, MSG* msg)
+{	/*this method is used by the controler to send the add packet to the designated switch*/
+	FRAME frame;
+	frame.kind = ADD;
+	frame.msg = *msg;
+	write(SCfifo, (char *)&frame, sizeof(frame));
+
+}
+
+MSG createRule(int port1, int port2, int dstIP, int srcIP,Controller cont)
+{	/*Method that creates a rule when a switch queries*/
+	MSG msg;
+	int dstSwitchNumber;
+	int actionVal;
+
+	 //iterate through all of the known connected switches and determine if there are any ip ranges that will accommodate the dstIP
+	for (int i = 0; i < cont.connectedSwitches.size(); i++)
+	{	
+		if (cont.connectedSwitches.at(i).packIP_lo <= dstIP && cont.connectedSwitches.at(i).packIP_hi >= dstIP)
+		{	//if the dstIP can fit within the switch under observation, then get switch number
+			dstSwitchNumber = cont.connectedSwitches.at(i).switchNumber;
+
+			//ASSUMING switches are in numerical order and there is a linear path from one switch to the next
+			//we can compare port1 and port2 to the dstSwitch and we should know which direction to sent the packet
+			if (port1 >= dstSwitchNumber) { actionVal = 1; } //send to port1 (left)
+			else if (port2 <= dstSwitchNumber) { actionVal = 2; } //send to port2 (right)
+
+			//create rule now that we have which port to send packet to
+			msg.rule.srcIP_lo = srcIP;
+			msg.rule.srcIP_hi = srcIP;
+			msg.rule.dstIP_lo = dstIP;
+			msg.rule.dstIP_hi = dstIP + 10; //arbitrarily have the range as 10
+			msg.rule.actionType = FORWARD;
+			msg.rule.actionVal = actionVal;
+			msg.rule.pri = 0; //arbitrary
+			return msg;
+		}
+	}
+	//if there is no switch that can accommodate dstIP, then we need to create a DROP rule 
+	msg.rule.srcIP_lo = srcIP;
+	msg.rule.srcIP_hi = srcIP;
+	msg.rule.dstIP_lo = dstIP;
+	msg.rule.dstIP_hi = dstIP + 10; //arbitrarily have the range as 10
+	msg.rule.actionType = DROP;
+	msg.rule.pri = 0; //arbitrary
+	msg.rule.pktCount = 0;
+	msg.rule.actionVal = 0;
+
+	return msg;
+}
+
 void executeController(int numberofSwitches)
 {	/* This method will be used for the instance that the controller is chosen*/
 	Controller cont;
@@ -225,6 +280,18 @@ void executeController(int numberofSwitches)
 					sendAckPacket(frame.msg.packet.switchNumber, cont.fifoWriteList[i]); //the corresponding write FIFO is at the same index as the read FIFO
 					cont.ackSentCounter += 1;
 				}
+
+				else if (frame.kind == QUERY)
+				{
+					MSG msg;
+					//create new rule based off dstIP and port numbers
+					msg = createRule(frame.msg.query.port1, frame.msg.query.port2, frame.msg.query.dstIP, frame.msg.query.srcIP,cont);
+
+					//send rule to switch and increase counters
+					sendAddPacket(frame.msg.query.switchNumber, cont.fifoWriteList[i], &msg);
+					cont.addSentCounter += 1;
+					cont.queryRcvCounter += 1;
+				}
 			}
 		}
 	}	
@@ -281,13 +348,16 @@ MSG composeOpenMessage(Switch* sw)
 	return msg;
 }
 
-MSG composeQueryMessage(Switch* sw, int dstIP)
+MSG composeQueryMessage(Switch* sw, int dstIP, int srcIP, int switchNumber)
 { /*Creates the message that contains the necessary information for querying*/
 	MSG msg;
 
+	msg.query.srcIP = srcIP;
 	msg.query.dstIP = dstIP;
 	msg.query.port1 = sw->port1;
 	msg.query.port2 = sw->port2;
+	msg.query.switchNumber = switchNumber;
+
 	return msg;
 }
 
@@ -326,14 +396,45 @@ void sendOpenPacket(int CSfifo, int SCfifo, Switch* sw)
 
 }
 
-void sendQueryPacket(int CSfifo, int SCfifo, Switch* sw, int dstIP)
+void sendQueryPacket(int CSfifo, int SCfifo, Switch* sw, int dstIP, int srcIP, int switchNumber)
 { /*this method is called when a switch cannot find a rule for a line in trafficFile, it sends the open packet
   to the controller and waits to receive the ADD packet*/
+	struct pollfd poll_list[1];
 	MSG msg;
 	FRAME frame;
 
-	msg = composeQueryMessage(sw, dstIP);
+	poll_list[0].fd = SCfifo;
+	poll_list[0].events = POLLIN;
 
+	msg = composeQueryMessage(sw, dstIP, srcIP, switchNumber);
+	//send the frame, indicating it is a packet of type QUERY
+	sendFrame(CSfifo, QUERY, &msg);
+	printf("Waiting for server to provide rule...\n");
+	poll(poll_list, 1, -1); //wait forever (maybe a bad idea, no?)
+	if ((poll_list[0].revents&POLLIN) == POLLIN)
+	{
+		//server wrote to SCfifo
+		frame = rcvFrame(SCfifo);
+		if (frame.kind == ADD)
+		{	//switch received the new rule, now must apply it
+			Rule rule;
+			rule.srcIP_hi = frame.msg.rule.srcIP_hi;
+			rule.srcIP_lo = frame.msg.rule.srcIP_lo;
+			rule.dstIP_hi = frame.msg.rule.dstIP_hi;
+			rule.dstIP_lo = frame.msg.rule.dstIP_lo;
+			rule.actionType = frame.msg.rule.actionType;
+			rule.actionVal = frame.msg.rule.actionVal;
+			rule.pri = frame.msg.rule.pri;
+			sw->rulesList.push_back(rule); 
+			sw->queryCounter += 1;
+			sw->addCounter += 1;
+			printf("Rule Received... \n");
+			return;
+		}
+
+
+	}
+	else { printf("error communicating with controller \n"); return; }
 }
 
 int checkRuleExists(Switch sw, int dstIP)
@@ -416,26 +517,27 @@ void executeSwitch(char* filename, int port1, int port2 , int lowIP, int highIP,
 				char cline[100];
 				char* temp;
 				int dstIP;
-				
+				int srcIP;
+				int ruleExist;
+
 				strcpy(cline, line.c_str());
 		
 				temp = strtok(cline, " "); //temp is now switch name
 				temp = strtok(NULL, " "); //temp is now srcIP
+				srcIP = atoi(temp);
 				temp = strtok(NULL, " "); //temp is now dstIP
 				dstIP = atoi(temp);
 
+				ruleExist = checkRuleExists(sw, dstIP); //checkRuleExists returns index of rule if it exists, otherwise it returns -1
 				//check if there is a rule that exists with these IP ranges
-				if (checkRuleExists(sw, dstIP) >= 0) //checkRuleExists returns index of rule if it exists, otherwise it returns -1
-				{
-					
-				}
-				else //no rule exists and we must QUERY
+				if (ruleExist == -1) 
 				{
 					cout << "No rule exists in flow table" << endl;
 					//send query packet to server
-					sendQueryPacket(CSfifo, SCfifo, &sw, dstIP);
-				
+					sendQueryPacket(CSfifo, SCfifo, &sw, dstIP, srcIP, sw.switchNumber);
 				}
+
+				//relay packet
 
 				//prompt user for command and then poll
 				cout << "Please enter 'list' or 'exit': ";
@@ -453,6 +555,7 @@ void executeSwitch(char* filename, int port1, int port2 , int lowIP, int highIP,
 				else { printf("Invalid Command"); continue; }
 
 				//poll
+
 			}
 			file.close();
 		}
@@ -525,7 +628,7 @@ int main(int argc, char* argv[])
 		}
 		else
 		{
-			port1num = atoi(&port2[2]);
+			port2num = atoi(&port2[2]);
 		}
 
 		executeSwitch(filename, port1num, port2num, lowIP, highIP, chosenSwitch, atoi(&chosenSwitch[2]));
