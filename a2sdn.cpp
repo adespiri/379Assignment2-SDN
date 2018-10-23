@@ -43,8 +43,14 @@ typedef struct {
 
 } MSG_PACKET; //used for OPEN. The switch sends its details to the controller, may have to rework this
 
+typedef struct {
+	int dstIP;
+	int port1;
+	int port2;
+} MSG_QUERY; //message struct that is used when querying for rules from the controller
 
-typedef union { MSG_PACKET packet; MSG_RULE rule;} MSG; //MSG can be an entire packet or rule or entire switch
+
+typedef union { MSG_PACKET packet; MSG_RULE rule; MSG_QUERY query; } MSG; //MSG can be an entire packet or rule or entire switch
 typedef struct { KIND kind; MSG msg; } FRAME;
 
 typedef struct {
@@ -262,7 +268,7 @@ void printFlowTable(Switch sw)
 	printf("\t Transmitted:\tOPEN:%d, QUERY:%d, RELAYOUT:%d \n\n", sw.openCounter, sw.queryCounter, sw.relayOutCounter);
 }
 
-MSG composePacketMessage(Switch* sw)
+MSG composeOpenMessage(Switch* sw)
 {
 	MSG msg;
 
@@ -272,6 +278,16 @@ MSG composePacketMessage(Switch* sw)
 	msg.packet.packIP_hi = sw->IP_hi;
 	msg.packet.switchNumber = sw->switchNumber;
 
+	return msg;
+}
+
+MSG composeQueryMessage(Switch* sw, int dstIP)
+{ /*Creates the message that contains the necessary information for querying*/
+	MSG msg;
+
+	msg.query.dstIP = dstIP;
+	msg.query.port1 = sw->port1;
+	msg.query.port2 = sw->port2;
 	return msg;
 }
 
@@ -285,7 +301,7 @@ void sendOpenPacket(int CSfifo, int SCfifo, Switch* sw)
 	poll_list[0].fd = SCfifo;
 	poll_list[0].events = POLLIN;
 
-	msg = composePacketMessage(sw);
+	msg = composeOpenMessage(sw);
 	//send the frame, indicating it is a packet of type OPEN
 	sendFrame(CSfifo, OPEN, &msg);
 	//use polling and wait for server to send ACK packet
@@ -310,9 +326,25 @@ void sendOpenPacket(int CSfifo, int SCfifo, Switch* sw)
 
 }
 
-bool checkRuleExists(Switch sw, int lowIP, int highIP)
-{
-	return true;
+void sendQueryPacket(int CSfifo, int SCfifo, Switch* sw, int dstIP)
+{ /*this method is called when a switch cannot find a rule for a line in trafficFile, it sends the open packet
+  to the controller and waits to receive the ADD packet*/
+	MSG msg;
+	FRAME frame;
+
+	msg = composeQueryMessage(sw, dstIP);
+
+}
+
+int checkRuleExists(Switch sw, int dstIP)
+{	/*Checks to see if there exists a rule in the switch with the given IPs, returns index of rule in list if it does exist*/
+	for (int i = 0; i < sw.rulesList.size(); i++)
+	{
+		Rule rule;
+		rule = sw.rulesList.at(i);
+		if (dstIP <= rule.dstIP_hi && dstIP >= rule.dstIP_lo) return i;
+	}
+	return -1; //-1 indicates rules does not exist
 }
 
 void executeSwitch(char* filename, int port1, int port2 , int lowIP, int highIP, char* thisSwitch, int switchNum)
@@ -383,25 +415,26 @@ void executeSwitch(char* filename, int port1, int port2 , int lowIP, int highIP,
 				and https://stackoverflow.com/questions/7352099/stdstring-to-char*/
 				char cline[100];
 				char* temp;
-				int lowIP;
-				int highIP;
+				int dstIP;
 				
 				strcpy(cline, line.c_str());
 		
 				temp = strtok(cline, " "); //temp is now switch name
-				temp = strtok(NULL, " "); //temp is now lowIP
-				lowIP = atoi(temp);
-				temp = strtok(NULL, " "); //temp is now highIP
-				highIP = atoi(temp);
+				temp = strtok(NULL, " "); //temp is now srcIP
+				temp = strtok(NULL, " "); //temp is now dstIP
+				dstIP = atoi(temp);
 
 				//check if there is a rule that exists with these IP ranges
-				if (checkRuleExists(sw, lowIP, highIP))
+				if (checkRuleExists(sw, dstIP) >= 0) //checkRuleExists returns index of rule if it exists, otherwise it returns -1
 				{
-
+					
 				}
 				else //no rule exists and we must QUERY
 				{
-
+					cout << "No rule exists in flow table" << endl;
+					//send query packet to server
+					sendQueryPacket(CSfifo, SCfifo, &sw, dstIP);
+				
 				}
 
 				//prompt user for command and then poll
