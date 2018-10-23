@@ -588,8 +588,9 @@ void executeSwitch(char* filename, int port1, int port2 , int lowIP, int highIP,
 }
 
 void user1Handler(int signum)
-{	
-	printf("\nUSER1 Signal Received... \n");
+{
+	printf("\n");
+	printf("\nUSER1 Signal Received... \n\n");
 	if (controllerSelected == true) 
 	{ 
 		printController(instanceController); 
@@ -601,6 +602,7 @@ void user1Handler(int signum)
 	{ 
 		printFlowTable(instanceSwitch); 
 		printf("Please type 'list' or 'exit': "); 
+		fflush(stdout);
 		return;
 	}
 	
