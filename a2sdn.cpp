@@ -98,6 +98,11 @@ typedef struct {
 	vector<int> fifoWriteList; //fifos to write to
 } Controller; //controller struct to contain counters
 
+Switch* instanceSwitch;
+Controller* instanceController;
+bool controllerSelected = false;
+bool switchSelected = false; //global variables that will be used when USER1 signal is received
+
 void sendFrame(int fd, KIND kind, MSG *msg) //using lab exercise on eclass as a reference
 {
 	FRAME frame;
@@ -132,21 +137,21 @@ FRAME rcvFrame(int fd)
 	return frame;
 }
 
-void printController(Controller cont)
+void printController(Controller* cont)
 { /* This method will print the controller details*/
 	printf("Switch Information: \n");
 	//for every switch that is connected, print its details
-	for (int i = 0; i < cont.connectedSwitches.size(); i++)
+	for (int i = 0; i < cont->connectedSwitches.size(); i++)
 	{
-		printf("[sw%d] port1= %d, port2= %d, port3= %d-%d\n", cont.connectedSwitches.at(i).switchNumber,
-			cont.connectedSwitches.at(i).port1, cont.connectedSwitches.at(i).port2,
-			cont.connectedSwitches.at(i).packIP_lo, cont.connectedSwitches.at(i).packIP_hi);
+		printf("[sw%d] port1= %d, port2= %d, port3= %d-%d\n", cont->connectedSwitches.at(i).switchNumber,
+			cont->connectedSwitches.at(i).port1, cont->connectedSwitches.at(i).port2,
+			cont->connectedSwitches.at(i).packIP_lo, cont->connectedSwitches.at(i).packIP_hi);
 	}
 
 	printf("\n");
 	printf("Packet Stats: \n");
-	printf("\tReceived:\tOPEN:%d, QUERY:%d\n", cont.openRcvCounter, cont.queryRcvCounter);
-	printf("\tTransmitted:\tACK:%d, ADD:%d\n\n", cont.ackSentCounter, cont.addSentCounter);
+	printf("\tReceived:\tOPEN:%d, QUERY:%d\n", cont->openRcvCounter, cont->queryRcvCounter);
+	printf("\tTransmitted:\tACK:%d, ADD:%d\n\n", cont->ackSentCounter, cont->addSentCounter);
 }
 
 void sendAckPacket(int switchNumber, int SCfifo)
@@ -191,6 +196,7 @@ MSG createRule(int port1, int port2, int dstIP, int srcIP,Controller cont)
 			msg.rule.actionType = FORWARD;
 			msg.rule.actionVal = actionVal;
 			msg.rule.pri = 0; //arbitrary
+			msg.rule.pktCount = 0;
 			return msg;
 		}
 	}
@@ -210,7 +216,7 @@ MSG createRule(int port1, int port2, int dstIP, int srcIP,Controller cont)
 void executeController(int numberofSwitches)
 {	/* This method will be used for the instance that the controller is chosen*/
 	Controller cont;
-
+	instanceController = &cont; //global controller quals cont, FOR USER1SIGNAL handling
 	cont.openRcvCounter = 0; //initialize counters
 	cont.queryRcvCounter = 0;
 	cont.ackSentCounter = 0;
@@ -238,12 +244,12 @@ void executeController(int numberofSwitches)
 
 		if (strcmp(usercmd, "list") == 0)
 		{ 
-			printController(cont);
+			printController(&cont);
 		}
 
 		else if (strcmp(usercmd, "exit") == 0)
 		{
-			printController(cont);
+			printController(&cont);
 			return;
 		}
 
@@ -288,6 +294,7 @@ void executeController(int numberofSwitches)
 					msg = createRule(frame.msg.query.port1, frame.msg.query.port2, frame.msg.query.dstIP, frame.msg.query.srcIP,cont);
 
 					//send rule to switch and increase counters
+					cout << "Sending new rule to switch..." << endl;
 					sendAddPacket(frame.msg.query.switchNumber, cont.fifoWriteList[i], &msg);
 					cont.addSentCounter += 1;
 					cont.queryRcvCounter += 1;
@@ -313,7 +320,7 @@ Rule initializeRules(int lowIP, int highIP)
 	return rule;
 }
 
-void printFlowTable(Switch sw)
+void printFlowTable(Switch* sw)
 {
 	int i = 0; //keeps track of specific rule number
 	//this function will print out the switch info to the terminal screen
@@ -321,7 +328,7 @@ void printFlowTable(Switch sw)
 	char actionString[20];
 	
 	//print out every table in the rulesList
-	for (vector<Rule>::iterator itr = sw.rulesList.begin(); itr != sw.rulesList.end(); itr++)
+	for (vector<Rule>::iterator itr = sw->rulesList.begin(); itr != sw->rulesList.end(); itr++)
 	{
 		if (itr->actionType == FORWARD) { strcpy(actionString,"FORWARD"); }
 		else if (itr->actionType == DROP) {strcpy(actionString, "DROP");}
@@ -331,8 +338,8 @@ void printFlowTable(Switch sw)
 	}
 	printf("\n");
 	printf("Packet Stats: \n");
-	printf("\t Received:\tADMIT:%d, ACK:%d, ADDRULE:%d, RELAYIN:%d \n", sw.admitCounter, sw.ackCounter, sw.addCounter, sw.relayInCounter);
-	printf("\t Transmitted:\tOPEN:%d, QUERY:%d, RELAYOUT:%d \n\n", sw.openCounter, sw.queryCounter, sw.relayOutCounter);
+	printf("\t Received:\tADMIT:%d, ACK:%d, ADDRULE:%d, RELAYIN:%d \n", sw->admitCounter, sw->ackCounter, sw->addCounter, sw->relayInCounter);
+	printf("\t Transmitted:\tOPEN:%d, QUERY:%d, RELAYOUT:%d \n\n", sw->openCounter, sw->queryCounter, sw->relayOutCounter);
 }
 
 MSG composeOpenMessage(Switch* sw)
@@ -425,6 +432,7 @@ void sendQueryPacket(int CSfifo, int SCfifo, Switch* sw, int dstIP, int srcIP, i
 			rule.actionType = frame.msg.rule.actionType;
 			rule.actionVal = frame.msg.rule.actionVal;
 			rule.pri = frame.msg.rule.pri;
+			rule.pktCount = frame.msg.rule.pktCount;
 			sw->rulesList.push_back(rule); 
 			sw->queryCounter += 1;
 			sw->addCounter += 1;
@@ -452,6 +460,7 @@ void executeSwitch(char* filename, int port1, int port2 , int lowIP, int highIP,
 {	/* This method will be used for the instance that the switch is chosen*/
 	//First initialize the switch object
 	Switch sw;
+	instanceSwitch = &sw; //global switch equals sw, FOR USER1SIGNAL handling
 	char usercmd[20];
 	int CSfifo;
 	int SCfifo;
@@ -544,12 +553,12 @@ void executeSwitch(char* filename, int port1, int port2 , int lowIP, int highIP,
 				cin >> usercmd;
 				if (strcmp(usercmd, "list") == 0)
 				{	//print out list
-					printFlowTable(sw);
+					printFlowTable(&sw);
 				}
 
 				else if (strcmp(usercmd, "exit") == 0)
 				{	//print out list and exit
-					printFlowTable(sw);
+					printFlowTable(&sw);
 					return;
 				}
 				else { printf("Invalid Command"); continue; }
@@ -565,15 +574,34 @@ void executeSwitch(char* filename, int port1, int port2 , int lowIP, int highIP,
 		cin >> usercmd;
 		if (strcmp(usercmd, "list") == 0)
 		{	//print out list
-			printFlowTable(sw);
+			printFlowTable(&sw);
 		}
 
 		else if (strcmp(usercmd, "exit") == 0)
 		{	//print out list and exit
-			printFlowTable(sw);
+			printFlowTable(&sw);
 			return;
 		}
 		else { printf("Invalid Command\n"); continue; }
+	}
+	
+}
+
+void user1Handler(int signum)
+{	
+	printf("\nUSER1 Signal Received... \n");
+	if (controllerSelected == true) 
+	{ 
+		printController(instanceController); 
+		printf("Please type 'list' or 'exit: "); 
+		fflush(stdout); //use of fflush in signalhandler https://stackoverflow.com/questions/1716296/why-does-printf-not-flush-after-the-call-unless-a-newline-is-in-the-format-strin
+		return; 
+	}
+	else if (switchSelected == true) 
+	{ 
+		printFlowTable(instanceSwitch); 
+		printf("Please type 'list' or 'exit': "); 
+		return;
 	}
 	
 }
@@ -584,12 +612,16 @@ int main(int argc, char* argv[])
 	either the user initiates the program from the view of a controller or they do it from
 	the view of a switch
 	*/
+	signal(SIGUSR1, user1Handler);
+
 	char chosenSwitch[100]; //will be used to determine if command line argument was for a switch and not controller
 	strcpy(chosenSwitch, argv[1]);
 	
 	if (strcmp(argv[1], "cont") == 0) //compare if argument entered was cont 
 	{
+		controllerSelected = true;
 		executeController(atoi(argv[2]));
+
 	}
 
 	else if (chosenSwitch[0] == 's' && chosenSwitch[1] == 'w') //compare if argument was switch
@@ -603,6 +635,7 @@ int main(int argc, char* argv[])
 		int port1num;
 		int port2num;
 
+		switchSelected = true;
 		strcpy(port1, argv[3]);	//copying main line arguments into actual variables for easier readibility
 		strcpy(port2, argv[4]);
 		strcpy(filename, argv[2]);
