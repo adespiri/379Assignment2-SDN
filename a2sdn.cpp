@@ -216,6 +216,7 @@ MSG createRule(int port1, int port2, int dstIP, int srcIP,Controller cont)
 	return msg;
 }
 
+
 void executeController(int numberofSwitches)
 {	/* This method will be used for the instance that the controller is chosen*/
 	Controller cont;
@@ -335,7 +336,7 @@ void printFlowTable(Switch* sw)
 	{
 		if (itr->actionType == FORWARD) { strcpy(actionString,"FORWARD"); }
 		else if (itr->actionType == DROP) {strcpy(actionString, "DROP");}
-		printf("[%d] (srcIP= %d-%d, destIP= %d-%d, action= %s:%d, pri= %d, pktCount=%d \n",
+		printf("[%d] (srcIP= %d-%d, destIP= %d-%d, action= %s:%d, pri= %d, pktCount=%d) \n",
 			i,itr->srcIP_lo, itr->srcIP_hi, itr->dstIP_lo, itr->dstIP_hi, actionString, itr->actionVal, itr->pri, itr->pktCount);
 		i++;
 	}
@@ -517,15 +518,100 @@ void processPacket(int srcIP, int dstIP, Switch* sw, int p1writeFifo, int p2writ
 
 }
 
-int checkRuleExists(Switch sw, int dstIP)
+int checkRuleExists(Switch* sw, int dstIP)
 {	/*Checks to see if there exists a rule in the switch with the given IPs, returns index of rule in list if it does exist*/
-	for (int i = 0; i < sw.rulesList.size(); i++)
+	for (int i = 0; i < sw->rulesList.size(); i++)
 	{
 		Rule rule;
-		rule = sw.rulesList.at(i);
+		rule = sw->rulesList.at(i);
 		if (dstIP <= rule.dstIP_hi && dstIP >= rule.dstIP_lo) return i;
 	}
 	return -1; //-1 indicates rules does not exist
+}
+
+void pollSwitches(Switch* sw, int p1readFifo, int p1writeFifo, int p2readFifo, int p2writeFifo, int SCfifo, int CSfifo)
+{	/*This function is called at the end of each switch loop. It polls the ports attached to switches
+	and processes any incoming packets*/
+	//poll port1 and port2
+	struct pollfd pollPorts[2];
+	int receivedSrcIP;
+	int receivedDstIP; //variables received from fifo
+
+	pollPorts[0].fd = p1readFifo; //setup pollfd struct
+	pollPorts[0].events = POLLIN;
+
+	pollPorts[1].fd = p2readFifo;
+	pollPorts[1].events = POLLIN;
+
+	poll(pollPorts, 2, 0); //do not block
+
+	//if ports were read from we need to process and query packets again
+	if ((pollPorts[0].revents&POLLIN) == POLLIN)
+	{	//port1 is read from
+		FRAME frame;
+		frame = rcvFrame(pollPorts[0].fd);
+		printf("Receiving relay from port1\n");
+		if (frame.kind == RELAY)
+		{
+			receivedSrcIP = frame.msg.relay.srcIP;
+			receivedDstIP = frame.msg.relay.dstIP;
+			sw->relayInCounter += 1; //increment counter
+			//check if srcIP and dstIP rule are in current switch
+			if (checkRuleExists(sw, receivedDstIP) == -1) //rule does not exists
+			{
+				cout << "No rule exists in flow table" << endl;
+				//send query packet to server
+				sendQueryPacket(CSfifo, SCfifo, sw, receivedDstIP, receivedSrcIP, sw->switchNumber);
+			}
+
+			//process the packets
+			processPacket(receivedSrcIP, receivedDstIP, sw, p1writeFifo, p2writeFifo);
+		}
+	}
+
+	if ((pollPorts[1].revents&POLLIN) == POLLIN)
+	{	//port2 is read from
+		FRAME frame;
+		frame = rcvFrame(pollPorts[1].fd);
+		printf("Receiving relay from port2\n");
+		if (frame.kind == RELAY)
+		{
+			receivedSrcIP = frame.msg.relay.srcIP;
+			receivedDstIP = frame.msg.relay.dstIP;
+			sw->relayInCounter += 1; //increment counter
+			//check if srcIP and dstIP rule are in current switch
+			if (checkRuleExists(sw, receivedDstIP) == -1) //rule does not exists
+			{
+				cout << "No rule exists in flow table" << endl;
+				//send query packet to server
+				sendQueryPacket(CSfifo, SCfifo, sw, receivedDstIP, receivedSrcIP, sw->switchNumber);
+			}
+
+			//process the packets
+			processPacket(receivedSrcIP, receivedDstIP, sw, p1writeFifo, p2writeFifo);
+		}
+	}
+
+}
+
+bool getUserCmdSwitch(Switch* sw)
+{	/*This function is used to get user input while in the switch perspective*/
+	char usercmd[20];
+	cout << "Please enter 'list' or 'exit': ";
+	cin >> usercmd;
+	if (strcmp(usercmd, "list") == 0)
+	{	//print out list
+		printFlowTable(sw); 
+		return true;
+	}
+
+	else if (strcmp(usercmd, "exit") == 0)
+	{	//print out list and exit
+		printFlowTable(sw);
+		return true;
+	}
+	else { printf("Invalid Command"); return false; }
+
 }
 
 void executeSwitch(char* filename, int port1, int port2 , int lowIP, int highIP, char* thisSwitch, int switchNum)
@@ -533,7 +619,6 @@ void executeSwitch(char* filename, int port1, int port2 , int lowIP, int highIP,
 	//First initialize the switch object
 	Switch sw;
 	instanceSwitch = &sw; //global switch equals sw, FOR USER1SIGNAL handling
-	char usercmd[20];
 	int CSfifo;
 	int SCfifo;
 	int p1writeFifo;
@@ -610,7 +695,7 @@ void executeSwitch(char* filename, int port1, int port2 , int lowIP, int highIP,
 				temp = strtok(NULL, " "); //temp is now dstIP
 				dstIP = atoi(temp);
 
-				ruleExist = checkRuleExists(sw, dstIP); //checkRuleExists returns index of rule if it exists, otherwise it returns -1
+				ruleExist = checkRuleExists(&sw, dstIP); //checkRuleExists returns index of rule if it exists, otherwise it returns -1
 				//check if there is a rule that exists with these IP ranges
 				if (ruleExist == -1) 
 				{
@@ -622,159 +707,23 @@ void executeSwitch(char* filename, int port1, int port2 , int lowIP, int highIP,
 				//relay packet
 				processPacket(srcIP, dstIP, &sw, p1writeFifo, p2writeFifo);
 
-				//prompt user for command and then poll
-				cout << "Please enter 'list' or 'exit': ";
-				cin >> usercmd;
-				if (strcmp(usercmd, "list") == 0)
-				{	//print out list
-					printFlowTable(&sw);
+				//prompt user for command, if invalid, continue loop
+				if (getUserCmdSwitch(&sw) == false) {
+					continue;
 				}
-
-				else if (strcmp(usercmd, "exit") == 0)
-				{	//print out list and exit
-					printFlowTable(&sw);
-					return;
-				}
-				else { printf("Invalid Command"); continue; }
-
-				//poll port1 and port2
-				struct pollfd pollPorts[2];
-				int receivedSrcIP;
-				int receivedDstIP; //variables received from fifo
-
-				pollPorts[0].fd = p1readFifo; //setup pollfd struct
-				pollPorts[0].events = POLLIN;
-
-				pollPorts[1].fd = p2readFifo;
-				pollPorts[1].events = POLLIN;
-
-				poll(pollPorts, 2, 0); //do not block
-
-				//if ports were read from we need to process and query packets again
-				if ((pollPorts[0].revents&POLLIN) == POLLIN)
-				{	//port1 is read from
-					FRAME frame;
-					frame = rcvFrame(pollPorts[0].fd);
-					printf("Receiving relay from port1\n");
-					if (frame.kind == RELAY)
-					{
-						receivedSrcIP = frame.msg.relay.srcIP;
-						receivedDstIP = frame.msg.relay.dstIP;
-						sw.relayInCounter += 1; //increment counter
-						//check if srcIP and dstIP rule are in current switch
-						if (checkRuleExists(sw, receivedDstIP) == -1) //rule does not exists
-						{
-							cout << "No rule exists in flow table" << endl;
-							//send query packet to server
-							sendQueryPacket(CSfifo, SCfifo, &sw, receivedDstIP, receivedSrcIP, sw.switchNumber);
-						}
-
-						//process the packets
-						processPacket(receivedSrcIP, receivedDstIP, &sw, p1writeFifo, p2writeFifo);
-					}
-				}
-
-				if ((pollPorts[1].revents&POLLIN) == POLLIN)
-				{	//port2 is read from
-					FRAME frame;
-					frame = rcvFrame(pollPorts[1].fd);
-					printf("Receiving relay from port2\n");
-					if (frame.kind == RELAY)
-					{
-						receivedSrcIP = frame.msg.relay.srcIP;
-						receivedDstIP = frame.msg.relay.dstIP;
-						sw.relayInCounter += 1; //increment counter
-						//check if srcIP and dstIP rule are in current switch
-						if (checkRuleExists(sw, receivedDstIP) == -1) //rule does not exists
-						{
-							cout << "No rule exists in flow table" << endl;
-							//send query packet to server
-							sendQueryPacket(CSfifo, SCfifo, &sw, receivedDstIP, receivedSrcIP, sw.switchNumber);
-						}
-
-						//process the packets
-						processPacket(receivedSrcIP, receivedDstIP, &sw, p1writeFifo, p2writeFifo);
-					}
-				}
-
+				
+				//poll ports 1 and ports 2
+				pollSwitches(&sw, p1readFifo, p1writeFifo, p2readFifo, p2writeFifo, SCfifo, CSfifo);
 			}
 			file.close();
 		}
 
 		//once file is done being read we still wait for keystrokes and poll 
-		cout << "Please enter 'list' or 'exit': ";
-		cin >> usercmd;
-		if (strcmp(usercmd, "list") == 0)
-		{	//print out list
-			printFlowTable(&sw);
+		if (getUserCmdSwitch(&sw) == false) {
+			continue;
 		}
-
-		else if (strcmp(usercmd, "exit") == 0)
-		{	//print out list and exit
-			printFlowTable(&sw);
-			return;
-		}
-		else { printf("Invalid Command\n"); continue; }
-
 		//poll port1 and port2
-		struct pollfd pollPorts[2];
-		int receivedSrcIP;
-		int receivedDstIP; //variables received from fifo
-
-		pollPorts[0].fd = p1readFifo; //setup pollfd struct
-		pollPorts[0].events = POLLIN;
-
-		pollPorts[1].fd = p2readFifo;
-		pollPorts[1].events = POLLIN;
-
-		poll(pollPorts, 2, 0); //do not block
-
-		//if ports were read from we need to process and query packets again
-		if ((pollPorts[0].revents&POLLIN) == POLLIN)
-		{	//port1 is read from
-			FRAME frame;
-			frame = rcvFrame(pollPorts[0].fd);
-			printf("Receiving relay from port1\n");
-			if (frame.kind == RELAY)
-			{
-				receivedSrcIP = frame.msg.relay.srcIP;
-				receivedDstIP = frame.msg.relay.dstIP;
-				sw.relayInCounter += 1; //increment counter
-				//check if srcIP and dstIP rule are in current switch
-				if (checkRuleExists(sw, receivedDstIP) == -1) //rule does not exists
-				{
-					cout << "No rule exists in flow table" << endl;
-					//send query packet to server
-					sendQueryPacket(CSfifo, SCfifo, &sw, receivedDstIP, receivedSrcIP, sw.switchNumber);
-				}
-
-				//process the packets
-				processPacket(receivedSrcIP, receivedDstIP, &sw, p1writeFifo, p2writeFifo);
-			}
-		}
-
-		if ((pollPorts[1].revents&POLLIN) == POLLIN)
-		{	//port1 is read from
-			FRAME frame;
-			frame = rcvFrame(pollPorts[1].fd);
-			printf("Receiving relay from port2\n");
-			if (frame.kind == RELAY)
-			{
-				receivedSrcIP = frame.msg.relay.srcIP;
-				receivedDstIP = frame.msg.relay.dstIP;
-				sw.relayInCounter += 1;
-				//check if srcIP and dstIP rule are in current switch
-				if (checkRuleExists(sw, receivedDstIP) == -1) //rule does not exists
-				{
-					cout << "No rule exists in flow table" << endl;
-					//send query packet to server
-					sendQueryPacket(CSfifo, SCfifo, &sw, receivedDstIP, receivedSrcIP, sw.switchNumber);
-				}
-
-				//process the packets
-				processPacket(receivedSrcIP, receivedDstIP, &sw, p1writeFifo, p2writeFifo);
-			}
-		}
+		pollSwitches(&sw, p1readFifo, p1writeFifo, p2readFifo, p2writeFifo, SCfifo, CSfifo);
 	}
 	
 }
