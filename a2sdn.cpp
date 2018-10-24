@@ -372,7 +372,11 @@ MSG composeQueryMessage(Switch* sw, int dstIP, int srcIP, int switchNumber)
 }
 
 MSG composeRelayMessage(int dstIP, int srcIP)
-{
+{	/*Creates message that relays ip addresses*/
+	MSG msg;
+	msg.relay.srcIP = srcIP;
+	msg.relay.dstIP = dstIP;
+	return msg;
 }
 
 void sendOpenPacket(int CSfifo, int SCfifo, Switch* sw)
@@ -457,6 +461,8 @@ void sendRelayPacket(int srcIP, int dstIP, Switch* sw, int selectedFifo)
 	struct pollfd poll_list[1];
 	MSG msg;
 	FRAME frame;
+
+	msg = composeRelayMessage(srcIP, dstIP);
 
 	poll_list[0].fd = selectedFifo;
 	poll_list[0].events = POLLIN;
@@ -656,20 +662,20 @@ void executeSwitch(char* filename, int port1, int port2 , int lowIP, int highIP,
 						receivedDstIP = frame.msg.relay.dstIP;
 						sw.relayInCounter += 1; //increment counter
 						//check if srcIP and dstIP rule are in current switch
-						if (checkRuleExists(sw, dstIP) == -1) //rule does not exists
+						if (checkRuleExists(sw, receivedDstIP) == -1) //rule does not exists
 						{
 							cout << "No rule exists in flow table" << endl;
 							//send query packet to server
-							sendQueryPacket(CSfifo, SCfifo, &sw, dstIP, srcIP, sw.switchNumber);
+							sendQueryPacket(CSfifo, SCfifo, &sw, receivedDstIP, receivedSrcIP, sw.switchNumber);
 						}
 
 						//process the packets
-						processPacket(srcIP, dstIP, &sw, p1writeFifo, p2writeFifo);
+						processPacket(receivedSrcIP, receivedDstIP, &sw, p1writeFifo, p2writeFifo);
 					}
 				}
 
 				if ((pollPorts[1].revents&POLLIN) == POLLIN)
-				{	//port1 is read from
+				{	//port2 is read from
 					FRAME frame;
 					frame = rcvFrame(pollPorts[1].fd);
 					printf("Receiving relay from port2\n");
@@ -679,15 +685,15 @@ void executeSwitch(char* filename, int port1, int port2 , int lowIP, int highIP,
 						receivedDstIP = frame.msg.relay.dstIP;
 						sw.relayInCounter += 1; //increment counter
 						//check if srcIP and dstIP rule are in current switch
-						if (checkRuleExists(sw, dstIP) == -1) //rule does not exists
+						if (checkRuleExists(sw, receivedDstIP) == -1) //rule does not exists
 						{
 							cout << "No rule exists in flow table" << endl;
 							//send query packet to server
-							sendQueryPacket(CSfifo, SCfifo, &sw, dstIP, srcIP, sw.switchNumber);
+							sendQueryPacket(CSfifo, SCfifo, &sw, receivedDstIP, receivedSrcIP, sw.switchNumber);
 						}
 
 						//process the packets
-						processPacket(srcIP, dstIP, &sw, p1writeFifo, p2writeFifo);
+						processPacket(receivedSrcIP, receivedDstIP, &sw, p1writeFifo, p2writeFifo);
 					}
 				}
 
@@ -735,15 +741,15 @@ void executeSwitch(char* filename, int port1, int port2 , int lowIP, int highIP,
 				receivedDstIP = frame.msg.relay.dstIP;
 				sw.relayInCounter += 1; //increment counter
 				//check if srcIP and dstIP rule are in current switch
-				if (checkRuleExists(sw, dstIP) == -1) //rule does not exists
+				if (checkRuleExists(sw, receivedDstIP) == -1) //rule does not exists
 				{
 					cout << "No rule exists in flow table" << endl;
 					//send query packet to server
-					sendQueryPacket(CSfifo, SCfifo, &sw, dstIP, srcIP, sw.switchNumber);
+					sendQueryPacket(CSfifo, SCfifo, &sw, receivedDstIP, receivedSrcIP, sw.switchNumber);
 				}
 
 				//process the packets
-				processPacket(srcIP, dstIP, &sw, p1writeFifo, p2writeFifo);
+				processPacket(receivedSrcIP, receivedDstIP, &sw, p1writeFifo, p2writeFifo);
 			}
 		}
 
@@ -758,15 +764,15 @@ void executeSwitch(char* filename, int port1, int port2 , int lowIP, int highIP,
 				receivedDstIP = frame.msg.relay.dstIP;
 				sw.relayInCounter += 1;
 				//check if srcIP and dstIP rule are in current switch
-				if (checkRuleExists(sw, dstIP) == -1) //rule does not exists
+				if (checkRuleExists(sw, receivedDstIP) == -1) //rule does not exists
 				{
 					cout << "No rule exists in flow table" << endl;
 					//send query packet to server
-					sendQueryPacket(CSfifo, SCfifo, &sw, dstIP, srcIP, sw.switchNumber);
+					sendQueryPacket(CSfifo, SCfifo, &sw, receivedDstIP, receivedSrcIP, sw.switchNumber);
 				}
 
 				//process the packets
-				processPacket(srcIP, dstIP, &sw, p1writeFifo, p2writeFifo);
+				processPacket(receivedSrcIP, receivedDstIP, &sw, p1writeFifo, p2writeFifo);
 			}
 		}
 	}

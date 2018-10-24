@@ -1,8 +1,4 @@
 #comment should be ignored
-sw1 900 900
-sw2 100 100
-sw2 100 250
-sw1 900 100
-sw3 250 300
-sw2 100 250
+sw1 100 100
+sw1 100 300
 #another comment
