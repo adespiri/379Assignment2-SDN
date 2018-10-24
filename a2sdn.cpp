@@ -22,7 +22,7 @@
 
 using namespace std;
 
-typedef enum {ACK, OPEN, QUERY, ADD, RELAY} KIND; //5 different kinds of packets
+typedef enum {ACK, OPEN, QUERY, ADD, RELAY, CONT_INPUT, SWITCH_INPUT} KIND; //7 different kinds of PACKETS. CONT_INPUT AND SWITCH_INPUT ARE USED FOR POLLING KEYBOARD
 typedef enum {DROP, FORWARD } ACTION; //two different kinds of actions
 
 typedef struct {
@@ -57,7 +57,12 @@ typedef struct {
 	int srcIP;
 	int dstIP;
 } MSG_RELAY;
-typedef union { MSG_PACKET packet; MSG_RULE rule; MSG_QUERY query; MSG_RELAY relay; } MSG; //MSG can be an entire packet or rule or entire switch
+
+typedef struct {
+	char usercmd[20];
+} MSG_KEYBOARD;
+
+typedef union { MSG_PACKET packet; MSG_RULE rule; MSG_QUERY query; MSG_RELAY relay; MSG_KEYBOARD keyboard; } MSG; //MSG can be an entire packet or rule or entire switch
 typedef struct { KIND kind; MSG msg; } FRAME;
 
 typedef struct {
@@ -79,6 +84,7 @@ typedef struct {
 	int port2;
 	int IP_lo;
 	int IP_hi;
+	int keyboardFifo;
 	vector<Rule> rulesList;
 
 	int admitCounter;
@@ -96,6 +102,7 @@ typedef struct {
 	int queryRcvCounter;
 	int ackSentCounter;
 	int addSentCounter;
+	int keyboardFifo;
 	vector<MSG_PACKET> connectedSwitches; //used for when controller acknowledges a new switch
 	vector<int> fifoReadList; //fifo read list contains all fifos that the controller will write to
 	vector<int> fifoWriteList; //fifos to write to
@@ -216,6 +223,29 @@ MSG createRule(int port1, int port2, int dstIP, int srcIP,Controller cont)
 	return msg;
 }
 
+MSG composeKeyboardMessage(char* usercmd)
+{			/*create the message that will be sent to the keyboard fifo*/
+	MSG msg;
+	strcpy(msg.keyboard.usercmd, usercmd);
+	return msg;
+
+}
+
+void pollKeyboard(int keyBoardFifo, KIND kind)
+{	//the user enters a line into the terminal. the command is sent to keyboardfifo where it will be polled
+	while (1) //do indefinitely
+	{	
+		char usercmd[30];
+		cin >> usercmd;
+
+
+		MSG msg;
+		msg = composeKeyboardMessage(usercmd);
+
+		//send it to the appropriate fifo
+		sendFrame(keyBoardFifo, kind, &msg);
+	}
+}
 
 void executeController(int numberofSwitches)
 {	/* This method will be used for the instance that the controller is chosen*/
@@ -225,9 +255,15 @@ void executeController(int numberofSwitches)
 	cont.queryRcvCounter = 0;
 	cont.ackSentCounter = 0;
 	cont.addSentCounter = 0;
+	pid_t newpid = fork(); //forking a process which is needed for polling keyboard
+	cont.keyboardFifo = open("fifo-keyboardcont", O_RDWR); //open up keyboard Fifo
 
+	if (newpid == 0) //the child process will go to the keyboard polling state
+	{
+		pollKeyboard(cont.keyboardFifo, CONT_INPUT);
+	}
 	char usercmd[30];
-	cout << "Controller Created" << endl;
+	cout << "Controller Created - supported commands: 'list' and 'exit'" << endl;
 
 	//open up all the FIFOs that are needed (2 * number of switches)
 	for (int i = 0; i < numberofSwitches; i++)
@@ -242,10 +278,19 @@ void executeController(int numberofSwitches)
 
 	while (1)
 	{
-		//poll the user for user command
-		cout << "Please type 'list' or 'exit': ";
-		cin >> usercmd;
+		//poll the keyboard for user command
+		struct pollfd keyboardPoll[1]; //initiate and set values
+		keyboardPoll[0].fd = cont.keyboardFifo;
+		keyboardPoll[0].events = POLLIN;
 
+		poll(keyboardPoll, 1, 0); //non blocking poll
+		if ((keyboardPoll[0].revents&POLLIN) == POLLIN)
+		{
+			FRAME frame;
+			frame = rcvFrame(keyboardPoll[0].fd);
+			strcpy(usercmd, frame.msg.keyboard.usercmd);
+		}
+		
 		if (strcmp(usercmd, "list") == 0)
 		{ 
 			printController(&cont);
@@ -254,13 +299,12 @@ void executeController(int numberofSwitches)
 		else if (strcmp(usercmd, "exit") == 0)
 		{
 			printController(&cont);
+			kill(newpid, SIGKILL);
 			return;
 		}
 
-		else 
-		{
-			cout << "Invalid Command" << endl; continue;
-		}
+		//reset usercmd
+		strcpy(usercmd, " ");
 
 		//poll the fifos and see if switches are trying to communicate, first initialize poll fd structure
 		struct pollfd pollReadList[cont.fifoReadList.size()];
@@ -280,7 +324,7 @@ void executeController(int numberofSwitches)
 				FRAME frame;
 				//if there was a request for communication, then receive frame and check what type of packet was sent
 				frame = rcvFrame(pollReadList[i].fd);
-
+			
 				if (frame.kind == OPEN)
 				{	//update controller list and counter
 					cont.connectedSwitches.push_back(frame.msg.packet);
@@ -537,16 +581,22 @@ void pollSwitches(Switch* sw, int p1readFifo, int p1writeFifo, int p2readFifo, i
 	int receivedSrcIP;
 	int receivedDstIP; //variables received from fifo
 
-	pollPorts[0].fd = p1readFifo; //setup pollfd struct
-	pollPorts[0].events = POLLIN;
+	if (sw->port1 != -1) 
+	{
+		pollPorts[0].fd = p1readFifo; //setup pollfd struct
+		pollPorts[0].events = POLLIN;
+	}
 
-	pollPorts[1].fd = p2readFifo;
-	pollPorts[1].events = POLLIN;
+	if (sw->port2 != 1)
+	{
+		pollPorts[1].fd = p2readFifo;
+		pollPorts[1].events = POLLIN;
+	}
 
 	poll(pollPorts, 2, 0); //do not block
 
 	//if ports were read from we need to process and query packets again
-	if ((pollPorts[0].revents&POLLIN) == POLLIN)
+	if ((pollPorts[0].revents&POLLIN) == POLLIN && sw->port1 != -1)
 	{	//port1 is read from
 		FRAME frame;
 		frame = rcvFrame(pollPorts[0].fd);
@@ -569,7 +619,7 @@ void pollSwitches(Switch* sw, int p1readFifo, int p1writeFifo, int p2readFifo, i
 		}
 	}
 
-	if ((pollPorts[1].revents&POLLIN) == POLLIN)
+	if ((pollPorts[1].revents&POLLIN) == POLLIN &&  sw->port2 != -1)
 	{	//port2 is read from
 		FRAME frame;
 		frame = rcvFrame(pollPorts[1].fd);
@@ -594,29 +644,53 @@ void pollSwitches(Switch* sw, int p1readFifo, int p1writeFifo, int p2readFifo, i
 
 }
 
-bool getUserCmdSwitch(Switch* sw)
+void getUserCmdSwitch(Switch* sw, int pid)
 {	/*This function is used to get user input while in the switch perspective*/
-	char usercmd[20];
-	cout << "Please enter 'list' or 'exit': ";
-	cin >> usercmd;
+	char usercmd[20] = " ";
+
+	//poll the keyboard for user command
+	struct pollfd keyboardPoll[1]; //initiate and set values
+	keyboardPoll[0].fd = sw->keyboardFifo;
+	keyboardPoll[0].events = POLLIN;
+	poll(keyboardPoll, 1, 0); //non blocking poll
+
+	if ((keyboardPoll[0].revents&POLLIN) == POLLIN)
+	{
+		FRAME frame;
+		frame = rcvFrame(keyboardPoll[0].fd);
+		strcpy(usercmd, frame.msg.keyboard.usercmd);
+	}
+
 	if (strcmp(usercmd, "list") == 0)
 	{	//print out list
 		printFlowTable(sw); 
-		return true;
+		return;
 	}
 
 	else if (strcmp(usercmd, "exit") == 0)
 	{	//print out list and exit
 		printFlowTable(sw);
-		return true;
+		kill(pid, SIGKILL); //kill child process when we are done
+		exit(1);
+		return;
 	}
-	else { printf("Invalid Command"); return false; }
+
+	
 
 }
 
 void executeSwitch(char* filename, int port1, int port2 , int lowIP, int highIP, char* thisSwitch, int switchNum)
 {	/* This method will be used for the instance that the switch is chosen*/
 	//First initialize the switch object
+	string line; //initiate trafficfile
+	ifstream file(filename);
+
+	if (file.fail()) {
+		printf("TRAFFICFILE DOES NOT EXIST\n"); exit(1);
+	} //check if file exists
+
+
+	printf("Switch number %d opened. Type in list or exit command to see switch info\n", switchNum);
 	Switch sw;
 	instanceSwitch = &sw; //global switch equals sw, FOR USER1SIGNAL handling
 	int CSfifo;
@@ -629,7 +703,7 @@ void executeSwitch(char* filename, int port1, int port2 , int lowIP, int highIP,
 	int srcIP;
 
 	sw.opened = false;
-	sw.port1 =  port1;
+	sw.port1 = port1;
 	sw.port2 = port2;
 	strcpy(sw.switchIs, thisSwitch);
 	sw.switchNumber = switchNum;
@@ -642,6 +716,17 @@ void executeSwitch(char* filename, int port1, int port2 , int lowIP, int highIP,
 	sw.openCounter = 0;
 	sw.queryCounter = 0;
 	sw.relayOutCounter = 0;
+
+	 //have to get proper keyboard fifo to read from
+	char keyboardFifoString[20];
+	strcpy(keyboardFifoString, "fifo-keyboardswY"); //replace the Y with the switch number
+	keyboardFifoString[15] = sw.switchNumber + '0';
+	sw.keyboardFifo = open(keyboardFifoString, O_RDWR); //open up the keyboard fifo for the switch
+
+	pid_t newpid = fork(); //fork, child will go to polling state
+	if (newpid == 0) { pollKeyboard(sw.keyboardFifo, SWITCH_INPUT); }
+	
+	
 	//initialize the first rule 
 	sw.rulesList.push_back(initializeRules(lowIP, highIP));
 
@@ -663,9 +748,6 @@ void executeSwitch(char* filename, int port1, int port2 , int lowIP, int highIP,
 
 	//send open packet to controller
 	sendOpenPacket(CSfifo, SCfifo, &sw);
-
-	string line;
-	ifstream file(filename); 
 
 	while (1) 
 	{
@@ -707,10 +789,9 @@ void executeSwitch(char* filename, int port1, int port2 , int lowIP, int highIP,
 				//relay packet
 				processPacket(srcIP, dstIP, &sw, p1writeFifo, p2writeFifo);
 
-				//prompt user for command, if invalid, continue loop
-				if (getUserCmdSwitch(&sw) == false) {
-					continue;
-				}
+				//poll user for command, if any
+				getUserCmdSwitch(&sw, newpid);
+				
 				
 				//poll ports 1 and ports 2
 				pollSwitches(&sw, p1readFifo, p1writeFifo, p2readFifo, p2writeFifo, SCfifo, CSfifo);
@@ -719,9 +800,7 @@ void executeSwitch(char* filename, int port1, int port2 , int lowIP, int highIP,
 		}
 
 		//once file is done being read we still wait for keystrokes and poll 
-		if (getUserCmdSwitch(&sw) == false) {
-			continue;
-		}
+		getUserCmdSwitch(&sw, newpid);
 		//poll port1 and port2
 		pollSwitches(&sw, p1readFifo, p1writeFifo, p2readFifo, p2writeFifo, SCfifo, CSfifo);
 	}
@@ -760,15 +839,22 @@ int main(int argc, char* argv[])
 	char chosenSwitch[100]; //will be used to determine if command line argument was for a switch and not controller
 	strcpy(chosenSwitch, argv[1]);
 	
-	if (strcmp(argv[1], "cont") == 0) //compare if argument entered was cont 
+	if (strcmp(argv[1], "cont") == 0 && argc == 3) //compare if argument entered was cont 
 	{
+		if (atoi(argv[2]) < 1 || atoi(argv[2]) > 7) { printf("Invalid number of switches\n"); return 0; }
 		controllerSelected = true;
 		executeController(atoi(argv[2]));
 
 	}
 
-	else if (chosenSwitch[0] == 's' && chosenSwitch[1] == 'w') //compare if argument was switch
+	else if (chosenSwitch[0] == 's' && chosenSwitch[1] == 'w' && argc == 6 ) //compare if argument was switch
 	{
+		if (strlen(chosenSwitch) != 3) 
+		{
+			printf("Invalid Switch Entered\n"); return 0;
+		} //if argument for switch is not the right length i.e sw was entered but not a number
+
+		else if (atoi(&chosenSwitch[2]) > 7 || atoi(&chosenSwitch[2]) < 1) { printf("Not a valid switch\n"); return 0; }
 		char* temp;
 		int lowIP;
 		int highIP;
@@ -787,6 +873,9 @@ int main(int argc, char* argv[])
 		lowIP = atoi(temp);
 		temp = strtok(NULL, "-");
 		highIP = atoi(temp);
+
+		if (port1 != "null" && (atoi(&port1[2]) < 1 || atoi(&port1[2]) > 7)) { printf("Invalid Switches Entered\n"); return 0; }//check if entered switch is valid
+		if (port2 != "null" && (atoi(&port2[2]) < 1 || atoi(&port2[2]) > 7)) { printf("Invalid Switches Entered\n"); return 0; }//check if entered switch is valid
 
 		//check if either of the ports is NULL
 		if (strcmp(argv[3], "null") == 0)
@@ -810,6 +899,8 @@ int main(int argc, char* argv[])
 		executeSwitch(filename, port1num, port2num, lowIP, highIP, chosenSwitch, atoi(&chosenSwitch[2]));
 
 	}
+
+	else { printf("Invalid Arguments/Command \n"); }
 
 	return 0;
 }
