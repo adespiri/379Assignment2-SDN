@@ -248,7 +248,7 @@ void pollKeyboard(int keyBoardFifo, KIND kind)
 }
 
 void executeController(int numberofSwitches)
-{	/* This method will be used for the instance that the controller is chosen*/
+{	/* This is the main method that will be used for the instance that the controller is chosen*/
 	Controller cont;
 	instanceController = &cont; //global controller quals cont, FOR USER1SIGNAL handling
 	cont.openRcvCounter = 0; //initialize counters
@@ -326,11 +326,13 @@ void executeController(int numberofSwitches)
 				frame = rcvFrame(pollReadList[i].fd);
 			
 				if (frame.kind == OPEN)
-				{	//update controller list and counter
-					cont.connectedSwitches.push_back(frame.msg.packet);
+				{	
 					cont.openRcvCounter += 1;
 					//send the switch ACK and increase ACK counter
 					cout << "New switch attempting to open" << endl;
+					
+					//update controller list and counter
+					cont.connectedSwitches.push_back(frame.msg.packet);
 					sendAckPacket(frame.msg.packet.switchNumber, cont.fifoWriteList[i]); //the corresponding write FIFO is at the same index as the read FIFO
 					cont.ackSentCounter += 1;
 				}
@@ -424,9 +426,9 @@ MSG composeRelayMessage(int dstIP, int srcIP)
 	return msg;
 }
 
-void sendOpenPacket(int CSfifo, int SCfifo, Switch* sw)
+bool sendOpenPacket(int CSfifo, int SCfifo, Switch* sw)
 { /*this method is called when a switch is initialized, it sends the open packet
-  to the controller and waits to receive the ACK packet*/
+  to the controller and waits to receive the ACK packet. Returns true if successful*/
 	struct pollfd poll_list[1]; //help on using poll from http://www.unixguide.net/unix/programming/2.1.2.shtml
 	MSG msg;
 	FRAME frame;
@@ -439,7 +441,7 @@ void sendOpenPacket(int CSfifo, int SCfifo, Switch* sw)
 	sendFrame(CSfifo, OPEN, &msg);
 	//use polling and wait for server to send ACK packet
 	printf("Waiting for server to acknowledge...\n");
-	poll(poll_list, 1, -1); //wait forever (maybe a bad idea, no?)
+	poll(poll_list, 1, 2000); //wait for two seconds
 	if ((poll_list[0].revents&POLLIN) == POLLIN)
 	{
 		//server wrote to SCfifo
@@ -450,12 +452,16 @@ void sendOpenPacket(int CSfifo, int SCfifo, Switch* sw)
 			sw->ackCounter += 1;
 			sw->opened = true;
 			printf("Acknowledgement Received... \n");
-			return;
+			return true;
 		}
 
 		
 	}
-	else { printf("error communicating with controller \n"); return; }
+	else 
+	{	printf("Error communicating with controller \n");
+	printf("Either controller is not open or controller capacity is full \n");
+		return false; 
+	}
 
 }
 
@@ -473,7 +479,7 @@ void sendQueryPacket(int CSfifo, int SCfifo, Switch* sw, int dstIP, int srcIP, i
 	//send the frame, indicating it is a packet of type QUERY
 	sendFrame(CSfifo, QUERY, &msg);
 	printf("Waiting for server to provide rule...\n");
-	poll(poll_list, 1, -1); //wait forever (maybe a bad idea, no?)
+	poll(poll_list, 1, 2000); //wait for two seconds 
 	if ((poll_list[0].revents&POLLIN) == POLLIN)
 	{
 		//server wrote to SCfifo
@@ -746,8 +752,8 @@ void executeSwitch(char* filename, int port1, int port2 , int lowIP, int highIP,
 		p2readFifo = openFIFO(sw.port2, sw.switchNumber);
 	}
 
-	//send open packet to controller
-	sendOpenPacket(CSfifo, SCfifo, &sw);
+	//send open packet to controller, if not successful, kill child process,return
+	if (!sendOpenPacket(CSfifo, SCfifo, &sw)) { kill(newpid, SIGKILL); return; }
 
 	while (1) 
 	{
@@ -763,7 +769,7 @@ void executeSwitch(char* filename, int port1, int port2 , int lowIP, int highIP,
 				)) continue;
 		
 				/*tokenize read string and determine if any of the rules for the switch apply TOKENIZING was created in reference to lab material 
-				and https://stackoverflow.com/questions/7352099/stdstring-to-char*/
+			*/
 				char cline[100];
 				char* temp;
 			
@@ -874,8 +880,8 @@ int main(int argc, char* argv[])
 		temp = strtok(NULL, "-");
 		highIP = atoi(temp);
 
-		if (port1 != "null" && (atoi(&port1[2]) < 1 || atoi(&port1[2]) > 7)) { printf("Invalid Switches Entered\n"); return 0; }//check if entered switch is valid
-		if (port2 != "null" && (atoi(&port2[2]) < 1 || atoi(&port2[2]) > 7)) { printf("Invalid Switches Entered\n"); return 0; }//check if entered switch is valid
+		if ((strcmp(port1, "null") != 0) && (atoi(&port1[2]) < 1 || atoi(&port1[2]) > 7)) { printf("Invalid Switches Entered\n"); return 0; }//check if entered switch is valid
+		if ((strcmp(port2, "null") != 0) && (atoi(&port2[2]) < 1 || atoi(&port2[2]) > 7)) { printf("Invalid Switches Entered\n"); return 0; }//check if entered switch is valid
 
 		//check if either of the ports is NULL
 		if (strcmp(argv[3], "null") == 0)
